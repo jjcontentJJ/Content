@@ -3,6 +3,7 @@
 // Może być uruchamiany przez cron/daemon (CLI) lub ręcznie (WWW)
 
 require_once 'config.php';
+require_once 'fetch_page_content.php';
 
 // Zmienna globalna do określania trybu (CLI vs WWW)
 $is_cli_mode = php_sapi_name() === 'cli';
@@ -65,84 +66,19 @@ function getProcessingDelayMinutes() {
 }
 
 /**
- * Pobiera treść strony z podanego URL
+ * Zapisuje log promptu do bazy danych
  */
-function fetchPageContent($url) {
-    logMessage("Fetching content from URL: $url");
-    
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language: pl,en-US;q=0.7,en;q=0.3',
-        'Accept-Encoding: gzip, deflate',
-        'DNT: 1',
-        'Connection: keep-alive',
-        'Upgrade-Insecure-Requests: 1',
-    ]);
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curl_error = curl_error($ch);
-    curl_close($ch);
-    
-    if ($curl_error) {
-        logMessage("cURL error fetching $url: $curl_error", 'error');
-        return '';
+function logPromptToDatabase($pdo, $task_item_id, $prompt_type, $prompt_content, $api_response) {
+    try {
+        $stmt = $pdo->prepare("
+            INSERT INTO prompt_logs (task_item_id, prompt_type, prompt_content, api_response) 
+            VALUES (?, ?, ?, ?)
+        ");
+        $stmt->execute([$task_item_id, $prompt_type, $prompt_content, $api_response]);
+        logMessage("Prompt log saved for task item $task_item_id, type: $prompt_type");
+    } catch (Exception $e) {
+        logMessage("Failed to save prompt log: " . $e->getMessage(), 'error');
     }
-    
-    if ($http_code !== 200) {
-        logMessage("HTTP error $http_code fetching $url", 'error');
-        return '';
-    }
-    
-    if (empty($response)) {
-        logMessage("Empty response from $url", 'error');
-        return '';
-    }
-    
-    // Wyczyść HTML i wyciągnij tekst
-    $content = extractTextFromHtml($response);
-    logMessage("Extracted " . strlen($content) . " characters from $url");
-    
-    return $content;
-}
-
-/**
- * Wyciąga tekst z HTML, usuwając tagi i niepotrzebne elementy
- */
-function extractTextFromHtml($html) {
-    // Usuń skrypty, style i inne niepotrzebne elementy
-    $html = preg_replace('/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/mi', '', $html);
-    $html = preg_replace('/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/mi', '', $html);
-    $html = preg_replace('/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/mi', '', $html);
-    $html = preg_replace('/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/mi', '', $html);
-    $html = preg_replace('/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/mi', '', $html);
-    
-    // Konwertuj HTML entities
-    $html = html_entity_decode($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-    
-    // Usuń wszystkie tagi HTML
-    $text = strip_tags($html);
-    
-    // Wyczyść białe znaki
-    $text = preg_replace('/\s+/', ' ', $text);
-    $text = trim($text);
-    
-    // Ogranicz długość do 2000 znaków (żeby nie przekroczyć limitów API)
-    if (strlen($text) > 20000) {
-        $text = substr($text, 0, 20000) . '...';
-    }
-    
-    return $text;
 }
 
 /**
@@ -252,10 +188,10 @@ function callGeminiAPI($prompt, $api_key) {
     if (isset($result['candidates'][0]['content']['parts'][0]['text'])) {
         $generated_text = $result['candidates'][0]['content']['parts'][0]['text'];
         logMessage("Generated text length: " . strlen($generated_text));
-        return $generated_text;
+        return ['text' => $generated_text, 'full_response' => $response];
     } elseif (isset($result['candidates'][0]['output'])) {
         logMessage("Generated text found in 'output' field, length: " . strlen($result['candidates'][0]['output']));
-        return $result['candidates'][0]['output'];
+        return ['text' => $result['candidates'][0]['output'], 'full_response' => $response];
     } elseif (isset($result['error'])) {
         throw new Exception("API Error from response: " . $result['error']['message'] . " (Code: " . ($result['error']['code'] ?? 'N/A') . ")");
     } else {
@@ -316,10 +252,17 @@ function processTaskItem($pdo, $queue_item, $api_key) {
 
     logMessage("Input data for ID {$task_item_id}: " . json_encode($input_data));
     
-    // Pobierz treść strony z URL
+    // Pobierz treść strony z URL i zapisz do bazy danych
     $page_content = '';
     if (isset($input_data['url']) && !empty($input_data['url'])) {
+        logMessage("Fetching page content for URL: " . $input_data['url']);
         $page_content = fetchPageContent($input_data['url']);
+        
+        // Zapisz treść strony do bazy danych
+        $stmt = $pdo->prepare("UPDATE task_items SET page_content = ? WHERE id = ?");
+        $stmt->execute([$page_content, $task_item_id]);
+        
+        logMessage("Page content fetched and saved, length: " . strlen($page_content));
     }
     
     // Przygotuj dane do zamiany w promptach
@@ -334,7 +277,12 @@ function processTaskItem($pdo, $queue_item, $api_key) {
     
     // KROK 1: Wygeneruj treść
     try {
-        $generated_text = callGeminiAPI($generate_prompt, $api_key);
+        $api_result = callGeminiAPI($generate_prompt, $api_key);
+        $generated_text = $api_result['text'];
+        
+        // Zapisz log promptu generowania
+        logPromptToDatabase($pdo, $task_item_id, 'generate', $generate_prompt, $api_result['full_response']);
+        
         logMessage("Content generated successfully for ID {$task_item_id}, length: " . strlen($generated_text));
     } catch (Exception $e) {
         logMessage("Error generating content for ID {$task_item_id}: " . $e->getMessage(), 'error');
@@ -349,7 +297,12 @@ function processTaskItem($pdo, $queue_item, $api_key) {
     $verify_prompt = replacePromptPlaceholders($verify_prompt_template, $verify_replacements);
     
     try {
-        $verified_text = callGeminiAPI($verify_prompt, $api_key);
+        $verify_api_result = callGeminiAPI($verify_prompt, $api_key);
+        $verified_text = $verify_api_result['text'];
+        
+        // Zapisz log promptu weryfikacji
+        logPromptToDatabase($pdo, $task_item_id, 'verify', $verify_prompt, $verify_api_result['full_response']);
+        
         logMessage("Content verified successfully for ID {$task_item_id}, length: " . strlen($verified_text));
         
         // Sprawdź czy tekst rzeczywiście został zmieniony
@@ -366,7 +319,7 @@ function processTaskItem($pdo, $queue_item, $api_key) {
         logMessage("Using original generated text as verified text due to verification failure.");
     }
     
-    // KROK 3: Zapisz oba teksty
+    // KROK 3: Zapisz oba teksty - UPEWNIJ SIĘ ŻE ZAPISUJEMY WŁAŚCIWE TEKSTY
     $stmt = $pdo->prepare("
         INSERT INTO generated_content (task_item_id, generated_text, verified_text, status) 
         VALUES (?, ?, ?, 'verified')
@@ -378,6 +331,8 @@ function processTaskItem($pdo, $queue_item, $api_key) {
     $stmt->execute([$task_item_id, $generated_text, $verified_text]);
     
     logMessage("Content generated and saved for ID {$task_item_id}");
+    logMessage("Generated text preview: " . substr($generated_text, 0, 100) . "...");
+    logMessage("Verified text preview: " . substr($verified_text, 0, 100) . "...");
 }
 
 /**

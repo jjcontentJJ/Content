@@ -18,6 +18,66 @@ if ($project_id) {
     }
 }
 
+// Obsługa usuwania zadania
+if (isset($_GET['delete']) && is_numeric($_GET['delete'])) {
+    $task_id = intval($_GET['delete']);
+    
+    // Sprawdź czy zadanie należy do użytkownika
+    $stmt = $pdo->prepare("
+        SELECT t.id 
+        FROM tasks t
+        JOIN projects p ON t.project_id = p.id
+        WHERE t.id = ? AND p.user_id = ?
+    ");
+    $stmt->execute([$task_id, $_SESSION['user_id']]);
+    
+    if ($stmt->fetch()) {
+        try {
+            $pdo->beginTransaction();
+            
+            // Usuń logi promptów
+            $stmt = $pdo->prepare("
+                DELETE pl FROM prompt_logs pl
+                JOIN task_items ti ON pl.task_item_id = ti.id
+                WHERE ti.task_id = ?
+            ");
+            $stmt->execute([$task_id]);
+            
+            // Usuń wygenerowane treści
+            $stmt = $pdo->prepare("
+                DELETE gc FROM generated_content gc
+                JOIN task_items ti ON gc.task_item_id = ti.id
+                WHERE ti.task_id = ?
+            ");
+            $stmt->execute([$task_id]);
+            
+            // Usuń elementy z kolejki
+            $stmt = $pdo->prepare("
+                DELETE tq FROM task_queue tq
+                JOIN task_items ti ON tq.task_item_id = ti.id
+                WHERE ti.task_id = ?
+            ");
+            $stmt->execute([$task_id]);
+            
+            // Usuń elementy zadania
+            $stmt = $pdo->prepare("DELETE FROM task_items WHERE task_id = ?");
+            $stmt->execute([$task_id]);
+            
+            // Usuń zadanie
+            $stmt = $pdo->prepare("DELETE FROM tasks WHERE id = ?");
+            $stmt->execute([$task_id]);
+            
+            $pdo->commit();
+            $success = 'Zadanie zostało usunięte wraz z wszystkimi powiązanymi danymi.';
+        } catch(Exception $e) {
+            $pdo->rollBack();
+            $error = 'Błąd usuwania zadania: ' . $e->getMessage();
+        }
+    } else {
+        $error = 'Nieprawidłowe zadanie.';
+    }
+}
+
 // Pobierz typy treści
 $stmt = $pdo->query("SELECT id, name FROM content_types ORDER BY name");
 $content_types = $stmt->fetchAll();
@@ -271,6 +331,11 @@ $tasks = $stmt->fetchAll();
                                                         <i class="fas fa-download"></i>
                                                     </a>
                                                 <?php endif; ?>
+                                                <a href="?delete=<?= $task['id'] ?><?= $project_id ? '&project_id=' . $project_id : '' ?>" 
+                                                   class="btn btn-sm btn-outline-danger" 
+                                                   onclick="return confirm('UWAGA: To usunie zadanie i WSZYSTKIE powiązane dane (treści, logi). Czy na pewno?')">
+                                                    <i class="fas fa-trash"></i>
+                                                </a>
                                             </div>
                                         </td>
                                     </tr>

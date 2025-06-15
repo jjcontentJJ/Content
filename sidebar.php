@@ -49,6 +49,11 @@
                 </a>
             </li>
             <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) == 'admin_prompt_logs.php' ? 'active' : '' ?>" href="admin_prompt_logs.php">
+                    <i class="fas fa-file-alt"></i> Logi promptów
+                </a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link <?= basename($_SERVER['PHP_SELF']) == 'admin_settings.php' ? 'active' : '' ?>" href="admin_settings.php">
                     <i class="fas fa-cog"></i> Ustawienia
                 </a>

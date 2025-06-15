@@ -16,10 +16,68 @@ if (isset($_GET['delete']) && is_numeric($_GET['delete'])) {
         $error = 'Nie możesz usunąć swojego własnego konta.';
     } else {
         try {
+            $pdo->beginTransaction();
+            
+            // Usuń wszystkie powiązane dane użytkownika
+            // Najpierw usuń logi promptów
+            $stmt = $pdo->prepare("
+                DELETE pl FROM prompt_logs pl
+                JOIN task_items ti ON pl.task_item_id = ti.id
+                JOIN tasks t ON ti.task_id = t.id
+                JOIN projects p ON t.project_id = p.id
+                WHERE p.user_id = ?
+            ");
+            $stmt->execute([$user_id]);
+            
+            // Usuń wygenerowane treści
+            $stmt = $pdo->prepare("
+                DELETE gc FROM generated_content gc
+                JOIN task_items ti ON gc.task_item_id = ti.id
+                JOIN tasks t ON ti.task_id = t.id
+                JOIN projects p ON t.project_id = p.id
+                WHERE p.user_id = ?
+            ");
+            $stmt->execute([$user_id]);
+            
+            // Usuń elementy z kolejki
+            $stmt = $pdo->prepare("
+                DELETE tq FROM task_queue tq
+                JOIN task_items ti ON tq.task_item_id = ti.id
+                JOIN tasks t ON ti.task_id = t.id
+                JOIN projects p ON t.project_id = p.id
+                WHERE p.user_id = ?
+            ");
+            $stmt->execute([$user_id]);
+            
+            // Usuń elementy zadań
+            $stmt = $pdo->prepare("
+                DELETE ti FROM task_items ti
+                JOIN tasks t ON ti.task_id = t.id
+                JOIN projects p ON t.project_id = p.id
+                WHERE p.user_id = ?
+            ");
+            $stmt->execute([$user_id]);
+            
+            // Usuń zadania
+            $stmt = $pdo->prepare("
+                DELETE t FROM tasks t
+                JOIN projects p ON t.project_id = p.id
+                WHERE p.user_id = ?
+            ");
+            $stmt->execute([$user_id]);
+            
+            // Usuń projekty
+            $stmt = $pdo->prepare("DELETE FROM projects WHERE user_id = ?");
+            $stmt->execute([$user_id]);
+            
+            // Usuń użytkownika
             $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?");
             $stmt->execute([$user_id]);
-            $success = 'Użytkownik został usunięty.';
+            
+            $pdo->commit();
+            $success = 'Użytkownik i wszystkie jego dane zostały usunięte.';
         } catch(Exception $e) {
+            $pdo->rollBack();
             $error = 'Błąd usuwania użytkownika: ' . $e->getMessage();
         }
     }
@@ -163,7 +221,7 @@ $users = $stmt->fetchAll();
                                                     </button>
                                                     <?php if ($user['id'] != $_SESSION['user_id']): ?>
                                                         <a href="?delete=<?= $user['id'] ?>" class="btn btn-sm btn-outline-danger" 
-                                                           onclick="return confirm('Czy na pewno chcesz usunąć tego użytkownika?')">
+                                                           onclick="return confirm('UWAGA: To usunie użytkownika i WSZYSTKIE jego dane (projekty, zadania, treści). Czy na pewno?')">
                                                             <i class="fas fa-trash"></i>
                                                         </a>
                                                     <?php endif; ?>

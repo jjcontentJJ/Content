@@ -7,18 +7,81 @@ $pdo = getDbConnection();
 $success = '';
 $error = '';
 
-// Obsługa zapisywania ustawień
+// Obsługa akcji administracyjnych
 if ($_POST) {
-    $gemini_api_key = trim($_POST['gemini_api_key']);
+    $action = $_POST['action'] ?? '';
     
-    try {
-        // Zapisz klucz API Gemini
-        $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES ('gemini_api_key', ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)");
-        $stmt->execute([$gemini_api_key]);
-        
-        $success = 'Ustawienia zostały zapisane.';
-    } catch(Exception $e) {
-        $error = 'Błąd zapisywania ustawień: ' . $e->getMessage();
+    switch ($action) {
+        case 'save_settings':
+            $gemini_api_key = trim($_POST['gemini_api_key']);
+            
+            try {
+                // Zapisz klucz API Gemini
+                $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES ('gemini_api_key', ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)");
+                $stmt->execute([$gemini_api_key]);
+                
+                $success = 'Ustawienia zostały zapisane.';
+            } catch(Exception $e) {
+                $error = 'Błąd zapisywania ustawień: ' . $e->getMessage();
+            }
+            break;
+            
+        case 'clear_logs':
+            try {
+                $stmt = $pdo->prepare("DELETE FROM prompt_logs");
+                $stmt->execute();
+                $success = 'Wszystkie logi promptów zostały usunięte.';
+            } catch(Exception $e) {
+                $error = 'Błąd usuwania logów: ' . $e->getMessage();
+            }
+            break;
+            
+        case 'clear_old_tasks':
+            try {
+                $pdo->beginTransaction();
+                
+                // Usuń zadania starsze niż 30 dni wraz z powiązanymi danymi
+                $stmt = $pdo->prepare("
+                    DELETE pl FROM prompt_logs pl
+                    JOIN task_items ti ON pl.task_item_id = ti.id
+                    JOIN tasks t ON ti.task_id = t.id
+                    WHERE t.created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                ");
+                $stmt->execute();
+                
+                $stmt = $pdo->prepare("
+                    DELETE gc FROM generated_content gc
+                    JOIN task_items ti ON gc.task_item_id = ti.id
+                    JOIN tasks t ON ti.task_id = t.id
+                    WHERE t.created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                ");
+                $stmt->execute();
+                
+                $stmt = $pdo->prepare("
+                    DELETE tq FROM task_queue tq
+                    JOIN task_items ti ON tq.task_item_id = ti.id
+                    JOIN tasks t ON ti.task_id = t.id
+                    WHERE t.created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                ");
+                $stmt->execute();
+                
+                $stmt = $pdo->prepare("
+                    DELETE ti FROM task_items ti
+                    JOIN tasks t ON ti.task_id = t.id
+                    WHERE t.created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                ");
+                $stmt->execute();
+                
+                $stmt = $pdo->prepare("DELETE FROM tasks WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+                $affected_rows = $stmt->execute();
+                
+                $pdo->commit();
+                $success = 'Stare zadania (starsze niż 30 dni) zostały usunięte.';
+            } catch(Exception $e) {
+                $pdo->rollBack();
+                $error = 'Błąd usuwania starych zadań: ' . $e->getMessage();
+            }
+            break;
     }
 }
 
@@ -46,6 +109,9 @@ $content_count = $stmt->fetch()['count'];
 
 $stmt = $pdo->query("SELECT COUNT(*) as count FROM task_queue WHERE status = 'pending'");
 $queue_count = $stmt->fetch()['count'];
+
+$stmt = $pdo->query("SELECT COUNT(*) as count FROM prompt_logs");
+$logs_count = $stmt->fetch()['count'];
 ?>
 
 <!DOCTYPE html>
@@ -91,6 +157,7 @@ $queue_count = $stmt->fetch()['count'];
                             </div>
                             <div class="card-body">
                                 <form method="POST">
+                                    <input type="hidden" name="action" value="save_settings">
                                     <div class="mb-3">
                                         <label for="gemini_api_key" class="form-label">Klucz API Google Gemini *</label>
                                         <input type="password" class="form-control" id="gemini_api_key" name="gemini_api_key" 
@@ -103,6 +170,38 @@ $queue_count = $stmt->fetch()['count'];
                                     
                                     <button type="submit" class="btn btn-primary">Zapisz ustawienia</button>
                                 </form>
+                            </div>
+                        </div>
+                        
+                        <div class="card mt-4">
+                            <div class="card-header">
+                                <h5 class="mb-0">Zarządzanie danymi</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <h6>Czyszczenie logów</h6>
+                                        <p class="text-muted">Usuń wszystkie logi promptów z bazy danych.</p>
+                                        <form method="POST" style="display: inline;">
+                                            <input type="hidden" name="action" value="clear_logs">
+                                            <button type="submit" class="btn btn-warning" 
+                                                    onclick="return confirm('Czy na pewno chcesz usunąć wszystkie logi promptów?')">
+                                                <i class="fas fa-trash"></i> Usuń logi (<?= $logs_count ?>)
+                                            </button>
+                                        </form>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <h6>Czyszczenie starych zadań</h6>
+                                        <p class="text-muted">Usuń zadania starsze niż 30 dni wraz z powiązanymi danymi.</p>
+                                        <form method="POST" style="display: inline;">
+                                            <input type="hidden" name="action" value="clear_old_tasks">
+                                            <button type="submit" class="btn btn-danger" 
+                                                    onclick="return confirm('Czy na pewno chcesz usunąć wszystkie zadania starsze niż 30 dni?')">
+                                                <i class="fas fa-trash"></i> Usuń stare zadania
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         
@@ -188,6 +287,13 @@ $queue_count = $stmt->fetch()['count'];
                                 <div class="text-center">
                                     <h5 class="text-danger"><?= $queue_count ?></h5>
                                     <small>Zadania w kolejce</small>
+                                </div>
+                                
+                                <hr>
+                                
+                                <div class="text-center">
+                                    <h5 class="text-secondary"><?= $logs_count ?></h5>
+                                    <small>Logi promptów</small>
                                 </div>
                             </div>
                         </div>
